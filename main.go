@@ -4,61 +4,92 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	iClientCame      = 1
-	iClientTookTable = 2
-	iClientWaiting   = 3
-	iClientLeft      = 4
+	incomingClientCame      = 1
+	incomingClientTookTable = 2
+	incomingClientWaiting   = 3
+	incomingClientLeft      = 4
 
-	oClientLeft      = 11
-	oClientTookTable = 12
-	oError           = 13
+	outcomingClientLeft      = 11
+	outcomingClientTookTable = 12
+	outcomingError           = 13
 
 	notOpenMsg         = "NotOpenYet"
 	alreadyPresentMsg  = "YouShallNotPass"
 	placeIsBusyMsg     = "PlaceIsBusy"
 	clientUnknownMsg   = "ClientUnknown"
-	canWaitNoLongerMsg = "ICanWaitNoLonger"
+	canWaitNoLongerMsg = "ICanWaitNoLonger!"
+)
+
+var (
+	IncomingEventIDs = []int{
+		incomingClientCame,
+		incomingClientTookTable,
+		incomingClientWaiting,
+		incomingClientLeft,
+	}
 )
 
 type ComputerClub struct {
 	TablesNumber int
 	StartTime    time.Time
 	EndTime      time.Time
-	Price        int
+	Tariff       int
 
 	TablesTaken int
 
 	Clients      map[string]*ClientInfo
-	WaitingQueue []string // how to remove clients from here?
+	WaitingQueue []string
+
+	TableStats []TableStat
 }
 
 type ClientInfo struct {
-	AtTable bool
-	Table   int
+	AtTable bool      // сел ли клиент за стол
+	Table   int       // номер стола
+	Time    time.Time // время, когда клиент сел за стол
 }
 
-// видимо надо не парсить строку за строкой, а сначала рапарсить весь файл, получить список ивентов, а потом уже выводить
-// если во время парсинга возникла ошибка - выводить строку.
+type TableStat struct {
+	TimeSpent time.Time
+	Revenue   int
+}
+
+type Event struct {
+	T          time.Time
+	ClientName string
+	ID         int
+
+	Table int
+}
+
+func (e Event) String() string {
+	if e.ID == incomingClientTookTable {
+		return fmt.Sprintf("%02d:%02d %d %s %d", e.T.Hour(), e.T.Minute(), e.ID, e.ClientName, e.Table)
+	} else {
+		return fmt.Sprintf("%02d:%02d %d %s", e.T.Hour(), e.T.Minute(), e.ID, e.ClientName)
+	}
+}
+
 func main() {
-	// args := os.Args
-	// if len(args) < 2 {
-	// 	fmt.Println("please provide a file path as first argument")
-	// 	return
-	// }
-	// filePath := args[1]
-	filePath := "input2.txt"
+	args := os.Args
+	if len(args) < 2 {
+		panic("please provide a file path as first argument")
+	}
+	filePath := args[1]
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("error opening file:", err)
-		return
+		panic("error opening file: " + err.Error())
 	}
 
 	club := ComputerClub{
@@ -67,11 +98,12 @@ func main() {
 
 	scanner := bufio.NewScanner(file)
 
-	club.TablesNumber, err = readNextInt(scanner)
+	club.TablesNumber, err = readNextPositiveInt(scanner)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
+	club.TableStats = make([]TableStat, club.TablesNumber)
 
 	club.StartTime, club.EndTime, err = readNextTime(scanner)
 	if err != nil {
@@ -79,39 +111,144 @@ func main() {
 		return
 	}
 
-	club.Price, err = readNextInt(scanner)
+	club.Tariff, err = readNextPositiveInt(scanner)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
 
-	fmt.Printf("%02d:%02d\n", club.StartTime.Hour(), club.StartTime.Minute())
+	// сначала парсим все строки и получаем список событий
+	events := []Event{}
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Println(line)
-		err := club.processInput(line)
+
+		var prevTime *time.Time = nil
+		if len(events) != 0 {
+			prevTime = &events[len(events)-1].T
+		}
+
+		event, err := club.parseEvent(line, prevTime)
+		// при неправильном формате входных данных выводим строку с ошибкой
 		if err != nil {
+			fmt.Println(line)
 			return
 		}
+		events = append(events, event)
+	}
+
+	// обрабатываем все события
+	fmt.Printf("%02d:%02d\n", club.StartTime.Hour(), club.StartTime.Minute())
+	for _, event := range events {
+		fmt.Println(event)
+		message := club.processEvent(event)
+		if message != "" {
+			fmt.Println(message)
+		}
+	}
+
+	// клиенты уходят
+	clientList := []string{}
+	for client := range club.Clients {
+		clientList = append(clientList, client)
+	}
+	sort.Strings(clientList)
+	for _, client := range clientList {
+		fmt.Println(getMessage(club.EndTime, outcomingClientLeft, client))
+		club.clientLeavesTable(client, club.EndTime)
 	}
 	fmt.Printf("%02d:%02d\n", club.EndTime.Hour(), club.EndTime.Minute())
+
+	// в конце выводим статистику по столам
+	for i, stat := range club.TableStats {
+		fmt.Printf("%d %d %02d:%02d\n", i+1, stat.Revenue, stat.TimeSpent.Hour(), stat.TimeSpent.Minute())
+	}
 }
 
-// readNextInt читает следующую строку из сканнера, и пытается конвертировать в int. Если не получается, возвращает ошибку со считанной строкой.
-func readNextInt(scanner *bufio.Scanner) (int, error) {
+func (c *ComputerClub) parseEvent(line string, prevTime *time.Time) (Event, error) {
+	params := strings.Fields(line)
+	if len(params) < 3 || len(params) > 4 {
+		return Event{}, errors.New("invalid line")
+	}
+
+	regex := regexp.MustCompile(`^\d{2}:\d{2}$`)
+	if !regex.MatchString(params[0]) {
+		return Event{}, errors.New("invalid time")
+	}
+	time, err := time.Parse(time.TimeOnly, params[0]+":00")
+	if err != nil {
+		return Event{}, err
+	}
+
+	// проверяем, что событие произошло дальше по времени
+	if prevTime != nil && time.Before(*prevTime) {
+		return Event{}, errors.New("invalid time")
+	}
+
+	// проверяем корректность id события
+	id, err := strconv.Atoi(params[1])
+	if err != nil {
+		return Event{}, err
+	}
+	if !Contains(IncomingEventIDs, id) {
+		return Event{}, errors.New("invalid event id")
+	}
+
+	clientName := params[2]
+	regex = regexp.MustCompile(`^[\d\w_-]+$`)
+	if !regex.MatchString(clientName) {
+		return Event{}, errors.New("invalid client name")
+	}
+
+	switch id {
+	case incomingClientCame, incomingClientWaiting, incomingClientLeft:
+		return Event{
+			T:          time,
+			ClientName: clientName,
+			ID:         id,
+		}, nil
+
+	case incomingClientTookTable:
+		if len(params) != 4 {
+			return Event{}, errors.New("invalid line")
+		}
+		// проверяем, что стол коррентный
+		tableNumber, err := strconv.Atoi(params[3])
+		if err != nil {
+			return Event{}, err
+		}
+		if tableNumber < 1 || tableNumber > c.TablesNumber {
+			return Event{}, errors.New("invalid table")
+		}
+
+		return Event{
+			T:          time,
+			ClientName: clientName,
+			ID:         id,
+			Table:      tableNumber,
+		}, nil
+
+	default:
+		return Event{}, errors.New("unkown event code")
+	}
+}
+
+// readNextPositiveInt читает следующую строку из сканнера, и пытается конвертировать в int.
+// Если не получается, возвращает ошибку со считанной строкой.
+func readNextPositiveInt(scanner *bufio.Scanner) (int, error) {
 	end := scanner.Scan()
 	if !end {
 		return 0, errors.New("not enough lines in file")
 	}
 	tablesString := scanner.Text()
 	value, err := strconv.Atoi(tablesString)
-	if err != nil {
+	if err != nil || value < 1 {
 		return 0, errors.New(tablesString)
 	}
 	return value, nil
 }
 
-// readNextTime читает следующую строку из сканнера, и пытается спарсить в time.Time 2 времени, разделенных пробелами. Если не получается, возвращает ошибку со считанной строкой.
+// readNextTime читает следующую строку из сканнера, и пытается спарсить в time.Time 2 времени, разделенных пробелами.
+// Если не получается, возвращает ошибку со считанной строкой.
 func readNextTime(scanner *bufio.Scanner) (time.Time, time.Time, error) {
 	end := scanner.Scan()
 	if !end {
@@ -126,133 +263,134 @@ func readNextTime(scanner *bufio.Scanner) (time.Time, time.Time, error) {
 	}
 	startTime, err := time.Parse(time.TimeOnly, timesStr[0]+":00")
 	if err != nil {
-		fmt.Println("error:", err)
 		return time.Time{}, time.Time{}, errors.New(line)
 	}
 	endTime, err := time.Parse(time.TimeOnly, timesStr[1]+":00")
 	if err != nil {
-		fmt.Println("error:", err)
 		return time.Time{}, time.Time{}, errors.New(line)
 
 	}
 	return startTime, endTime, nil
 }
 
-func printMessage(t time.Time, code int, message string) {
-	fmt.Printf("%02d:%02d %d %s\n", t.Hour(), t.Minute(), code, message)
+func getMessage(t time.Time, code int, message string) string {
+	return fmt.Sprintf("%02d:%02d %d %s", t.Hour(), t.Minute(), code, message)
 }
 
-// processInput обрабатывает строку и выводит сообщение. Если возникает ошибка, возвращает error.
-func (c *ComputerClub) processInput(input string) error {
-	params := strings.Fields(input)
-	if len(params) < 3 {
-		return errors.New("invalid line")
-	}
+// processEvent обрабатывает строку и выводит сообщение. Если возникает ошибка, возвращает error.
+func (c *ComputerClub) processEvent(event Event) string {
+	switch event.ID {
+	case incomingClientCame:
+		if !c.isOpen(event.T) {
+			return getMessage(event.T, outcomingError, notOpenMsg)
+		}
+		if _, ok := c.Clients[event.ClientName]; ok {
+			return getMessage(event.T, outcomingError, alreadyPresentMsg)
+		}
+		c.Clients[event.ClientName] = &ClientInfo{}
 
-	time, err := time.Parse(time.TimeOnly, params[0]+":00")
-	if err != nil {
-		return err
-	}
-	event, err := strconv.Atoi(params[1])
-	if err != nil {
-		return err
-	}
-	clientName := params[2]
+	case incomingClientTookTable:
+		if c.isTableTaken(event.Table) {
+			return getMessage(event.T, outcomingError, placeIsBusyMsg)
+		}
+		info, ok := c.Clients[event.ClientName]
+		if !ok {
+			return getMessage(event.T, outcomingError, clientUnknownMsg)
+		}
+		if info.AtTable {
+			c.clientLeavesTable(event.ClientName, event.T)
+		}
+		c.clientTakesTable(event.ClientName, event.Table, event.T)
 
-	switch event {
-	case iClientCame:
-		if !c.isOpen(time) {
-			printMessage(time, oError, notOpenMsg)
-			return nil
-		}
-		if _, ok := c.Clients[clientName]; ok {
-			printMessage(time, oError, alreadyPresentMsg)
-			return nil
-		}
-		c.Clients[clientName] = &ClientInfo{}
-
-	case iClientTookTable:
-		if len(params) != 4 {
-			return errors.New("invalid line")
-		}
-		tableNumber, err := strconv.Atoi(params[3])
-		if err != nil {
-			return err
-		}
-		if tableNumber > c.TablesNumber || tableNumber < 1 {
-			return errors.New("incorrect table number")
-		}
-		if c.isTableTaken(tableNumber) {
-			printMessage(time, oError, placeIsBusyMsg)
-			return nil
-		}
-		if _, ok := c.Clients[clientName]; !ok {
-			printMessage(time, oError, clientUnknownMsg)
-			return nil
-		}
-		c.takeTable(clientName, tableNumber)
-
-	case iClientWaiting:
+	case incomingClientWaiting:
 		if c.TablesTaken < c.TablesNumber {
-			printMessage(time, oError, canWaitNoLongerMsg)
-			return nil
+			return getMessage(event.T, outcomingError, canWaitNoLongerMsg)
 		}
 		if len(c.WaitingQueue)+1 > c.TablesNumber {
-			printMessage(time, oClientLeft, clientName)
-			return nil
+			return getMessage(event.T, outcomingClientLeft, event.ClientName)
 		}
-		c.WaitingQueue = append(c.WaitingQueue, clientName)
+		c.WaitingQueue = append(c.WaitingQueue, event.ClientName)
 
-	case iClientLeft:
-		info, ok := c.Clients[clientName]
+	case incomingClientLeft:
+		info, ok := c.Clients[event.ClientName]
 		if !ok {
-			printMessage(time, oError, clientUnknownMsg)
-			return nil
+			return getMessage(event.T, outcomingError, clientUnknownMsg)
 		}
-		delete(c.Clients, clientName)
 		// если ушедший клиент сидел за столом
 		if info.AtTable {
+			c.clientLeavesTable(event.ClientName, event.T)
 			if len(c.WaitingQueue) != 0 {
 				nextClient := c.WaitingQueue[0]
 				c.WaitingQueue = c.WaitingQueue[1:]
-				c.Clients[nextClient] = &ClientInfo{
-					AtTable: true,
-					Table:   info.Table,
-				}
-				printMessage(time, oClientTookTable, nextClient)
-			} else {
-				c.TablesTaken--
+				c.clientTakesTable(nextClient, info.Table, event.T)
+
+				delete(c.Clients, event.ClientName)
+				return getMessage(event.T, outcomingClientTookTable, fmt.Sprintf("%s %d", nextClient, info.Table))
 			}
 		}
+		delete(c.Clients, event.ClientName)
 	}
-
-	return nil
+	return ""
 }
 
 // isOpen проверяет, находится ли вермя t в промежутке от открытия и закрытия клуба
 func (c *ComputerClub) isOpen(t time.Time) bool {
-	return t.After(c.StartTime) && t.Before(c.EndTime)
+	return (t.Equal(c.StartTime) || t.After(c.StartTime)) && t.Before(c.EndTime)
 }
 
 func (c *ComputerClub) isTableTaken(table int) bool {
-	for _, info := range c.Clients {
-		if info.AtTable && info.Table == table {
-			return true
-		}
-	}
-	return false
+	return Contains(c.getListOfTakenTables(), table)
 }
 
-// takeTable назначет клиенту занятый стол, если клиент до этого не сидел за столом увеличивает счетчик занятых столов. Если клиент не находится в клубе - ничего не происходит.
-func (c *ComputerClub) takeTable(clientName string, tableNumber int) {
+func (c *ComputerClub) getListOfTakenTables() []int {
+	result := []int{}
+	for _, info := range c.Clients {
+		if info.AtTable {
+			result = append(result, info.Table)
+		}
+	}
+	return result
+}
+
+// clientTakesTable назначет клиенту занятый стол, увеличивает счетчик занятых столов. Если клиент не находится в клубе - ничего не происходит.
+func (c *ComputerClub) clientTakesTable(clientName string, tableNumber int, t time.Time) {
 	info, ok := c.Clients[clientName]
 	if !ok {
 		return
 	}
 
+	info.AtTable = true
 	info.Table = tableNumber
-	if !info.AtTable {
-		info.AtTable = true
-		c.TablesTaken++
+	info.Time = t
+	c.TablesTaken++
+}
+
+// clientLeavesTable обновляет статистику по столам, уменьшает счетчик занятых столов
+// если клиента нет в клубе или клиент не сидел за столом, ничего не происходит
+func (c *ComputerClub) clientLeavesTable(clientName string, t time.Time) {
+	info, ok := c.Clients[clientName]
+	if !ok || !info.AtTable {
+		return
 	}
+	info.AtTable = false
+	c.TablesTaken--
+
+	timeDiff := t.Sub(info.Time)
+	index := info.Table - 1
+
+	// увеличиваем время, проведенное за столом
+	c.TableStats[index].TimeSpent = c.TableStats[index].TimeSpent.Add(timeDiff)
+
+	//увеличиваем доход
+	revenue := int(math.Ceil(timeDiff.Hours()))
+	c.TableStats[index].Revenue += revenue * c.Tariff
+}
+
+func Contains(slice []int, value int) bool {
+	for _, v := range slice {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
