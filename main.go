@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"regexp"
@@ -87,6 +88,11 @@ func main() {
 	}
 	filePath := args[1]
 
+	Run(filePath, os.Stdout)
+}
+
+// Run принимает на вход путь до файла, который надо считать, и записывает вывод в out.
+func Run(filePath string, out io.Writer) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		panic("error opening file: " + err.Error())
@@ -100,20 +106,20 @@ func main() {
 
 	club.TablesNumber, err = readNextPositiveInt(scanner)
 	if err != nil {
-		fmt.Println(err.Error())
+		fmt.Fprint(out, err.Error())
 		return
 	}
 	club.TableStats = make([]TableStat, club.TablesNumber)
 
 	club.StartTime, club.EndTime, err = readNextTime(scanner)
 	if err != nil {
-		fmt.Println(err.Error())
+		fmt.Fprint(out, err.Error())
 		return
 	}
 
 	club.Tariff, err = readNextPositiveInt(scanner)
 	if err != nil {
-		fmt.Println(err.Error())
+		fmt.Fprint(out, err.Error())
 		return
 	}
 
@@ -130,19 +136,24 @@ func main() {
 		event, err := club.parseEvent(line, prevTime)
 		// при неправильном формате входных данных выводим строку с ошибкой
 		if err != nil {
-			fmt.Println(line)
+			fmt.Fprint(out, line)
 			return
 		}
 		events = append(events, event)
 	}
 
+	err = file.Close()
+	if err != nil {
+		panic(err)
+	}
+
 	// обрабатываем все события
-	fmt.Printf("%02d:%02d\n", club.StartTime.Hour(), club.StartTime.Minute())
+	fmt.Fprintf(out, "%02d:%02d\n", club.StartTime.Hour(), club.StartTime.Minute())
 	for _, event := range events {
-		fmt.Println(event)
+		fmt.Fprintln(out, event)
 		message := club.processEvent(event)
 		if message != "" {
-			fmt.Println(message)
+			fmt.Fprintln(out, message)
 		}
 	}
 
@@ -153,14 +164,17 @@ func main() {
 	}
 	sort.Strings(clientList)
 	for _, client := range clientList {
-		fmt.Println(getMessage(club.EndTime, outcomingClientLeft, client))
+		fmt.Fprintln(out, getMessage(club.EndTime, outcomingClientLeft, client))
 		club.clientLeavesTable(client, club.EndTime)
 	}
-	fmt.Printf("%02d:%02d\n", club.EndTime.Hour(), club.EndTime.Minute())
+	fmt.Fprintf(out, "%02d:%02d\n", club.EndTime.Hour(), club.EndTime.Minute())
 
 	// в конце выводим статистику по столам
 	for i, stat := range club.TableStats {
-		fmt.Printf("%d %d %02d:%02d\n", i+1, stat.Revenue, stat.TimeSpent.Hour(), stat.TimeSpent.Minute())
+		fmt.Fprintf(out, "%d %d %02d:%02d", i+1, stat.Revenue, stat.TimeSpent.Hour(), stat.TimeSpent.Minute())
+		if i < len(club.TableStats)-1 {
+			fmt.Fprintf(out, "\n")
+		}
 	}
 }
 
@@ -200,13 +214,6 @@ func (c *ComputerClub) parseEvent(line string, prevTime *time.Time) (Event, erro
 	}
 
 	switch id {
-	case incomingClientCame, incomingClientWaiting, incomingClientLeft:
-		return Event{
-			T:          time,
-			ClientName: clientName,
-			ID:         id,
-		}, nil
-
 	case incomingClientTookTable:
 		if len(params) != 4 {
 			return Event{}, errors.New("invalid line")
@@ -228,7 +235,11 @@ func (c *ComputerClub) parseEvent(line string, prevTime *time.Time) (Event, erro
 		}, nil
 
 	default:
-		return Event{}, errors.New("unkown event code")
+		return Event{
+			T:          time,
+			ClientName: clientName,
+			ID:         id,
+		}, nil
 	}
 }
 
