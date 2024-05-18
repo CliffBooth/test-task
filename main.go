@@ -203,7 +203,8 @@ func (c *ComputerClub) parseEvent(line string, prevTime *time.Time) (Event, erro
 	if err != nil {
 		return Event{}, err
 	}
-	if !Contains(IncomingEventIDs, id) {
+	contains, _ := Contains(IncomingEventIDs, id)
+	if !contains {
 		return Event{}, errors.New("invalid event id")
 	}
 
@@ -288,7 +289,7 @@ func getMessage(t time.Time, code int, message string) string {
 	return fmt.Sprintf("%02d:%02d %d %s", t.Hour(), t.Minute(), code, message)
 }
 
-// processEvent обрабатывает строку и выводит сообщение. Если возникает ошибка, возвращает error.
+// processEvent обрабатывает строку и возвращает ответ.
 func (c *ComputerClub) processEvent(event Event) string {
 	switch event.ID {
 	case incomingClientCame:
@@ -314,14 +315,21 @@ func (c *ComputerClub) processEvent(event Event) string {
 		c.clientTakesTable(event.ClientName, event.Table, event.T)
 
 	case incomingClientWaiting:
+		// если клиент уже за столом, игнорируем
+		info, ok := c.Clients[event.ClientName]
+		if !ok || info.AtTable {
+			return ""
+		}
 		if c.TablesTaken < c.TablesNumber {
 			return getMessage(event.T, outcomingError, canWaitNoLongerMsg)
 		}
 		if len(c.WaitingQueue)+1 > c.TablesNumber {
+			delete(c.Clients, event.ClientName)
 			return getMessage(event.T, outcomingClientLeft, event.ClientName)
 		}
 		c.WaitingQueue = append(c.WaitingQueue, event.ClientName)
 
+	//TODO что если клиент в очереди?
 	case incomingClientLeft:
 		info, ok := c.Clients[event.ClientName]
 		if !ok {
@@ -340,6 +348,10 @@ func (c *ComputerClub) processEvent(event Event) string {
 			}
 		}
 		delete(c.Clients, event.ClientName)
+		contains, index := Contains(c.WaitingQueue, event.ClientName)
+		if contains {
+			c.WaitingQueue = append(c.WaitingQueue[:index], c.WaitingQueue[index+1:]...)
+		}
 	}
 	return ""
 }
@@ -350,7 +362,8 @@ func (c *ComputerClub) isOpen(t time.Time) bool {
 }
 
 func (c *ComputerClub) isTableTaken(table int) bool {
-	return Contains(c.getListOfTakenTables(), table)
+	contains, _ := Contains(c.getListOfTakenTables(), table)
+	return contains
 }
 
 func (c *ComputerClub) getListOfTakenTables() []int {
@@ -397,11 +410,11 @@ func (c *ComputerClub) clientLeavesTable(clientName string, t time.Time) {
 	c.TableStats[index].Revenue += revenue * c.Tariff
 }
 
-func Contains(slice []int, value int) bool {
-	for _, v := range slice {
+func Contains[T comparable](slice []T, value T) (bool, int) {
+	for i, v := range slice {
 		if v == value {
-			return true
+			return true, i
 		}
 	}
-	return false
+	return false, 0
 }

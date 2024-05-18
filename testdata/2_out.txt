@@ -36,7 +36,6 @@
 20:00 11 antony
 20:00 11 client1
 20:00 11 client2
-20:00 11 client3
 20:00 11 john
 20:00 11 zack
 20:00

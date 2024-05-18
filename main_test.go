@@ -94,6 +94,12 @@ func TestRun(t *testing.T) {
 			inputFile:  getFullPath("10_in.txt"),
 			outputFile: getFullPath("10_out.txt"),
 		},
+
+		// клиент уходит из очереди ожидания
+		{
+			inputFile:  getFullPath("11_in.txt"),
+			outputFile: getFullPath("11_out.txt"),
+		},
 	}
 
 	for _, testCase := range testCases {
