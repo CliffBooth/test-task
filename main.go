@@ -329,7 +329,6 @@ func (c *ComputerClub) processEvent(event Event) string {
 		}
 		c.WaitingQueue = append(c.WaitingQueue, event.ClientName)
 
-	//TODO что если клиент в очереди?
 	case incomingClientLeft:
 		info, ok := c.Clients[event.ClientName]
 		if !ok {
